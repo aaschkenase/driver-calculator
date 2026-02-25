@@ -1556,7 +1556,12 @@ td {
       
       <div class="week-selector">
         <div class="selector-label">Active Week</div>
-        <select id="weekSelect" onchange="onWeekChange()"></select>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button class="btn-icon" onclick="navWeekPrev()" style="padding:12px 10px;min-width:auto;" title="Previous Week">◀</button>
+          <select id="weekSelect" onchange="onWeekChange()" style="flex:1;"></select>
+          <button class="btn-icon" onclick="navWeekNext()" style="padding:12px 10px;min-width:auto;" title="Next Week">▶</button>
+          <button class="btn-icon" onclick="navWeekCurrent()" style="padding:12px 10px;font-size:11px;" title="Jump to This Week">Today</button>
+        </div>
       </div>
       
       <button class="btn-icon danger" onclick="resetCurrentWeek()">
@@ -1675,6 +1680,12 @@ td {
       </div>
     </div>
 
+    <div id="futureWeekBanner" style="display:none;margin-bottom:16px;padding:12px 20px;background:linear-gradient(135deg, rgba(255,184,0,0.1), rgba(0,180,255,0.1));border:1px solid rgba(255,184,0,0.3);border-left:4px solid var(--warning);border-radius:12px;font-weight:600;color:var(--text-primary);animation:slideDown 0.4s ease-out;">
+      <span style="font-size:16px;margin-right:8px;">📅</span>
+      <span id="futureWeekBannerText">Planning Mode — You're viewing a future week</span>
+      <button onclick="navWeekCurrent()" style="margin-left:16px;background:var(--bg-primary);border:1px solid var(--border-medium);color:var(--accent-cyan);padding:6px 14px;border-radius:8px;font-family:'Rajdhani',sans-serif;font-size:12px;font-weight:700;cursor:pointer;text-transform:uppercase;">↩ Back to This Week</button>
+    </div>
+
     <div class="stats-grid">
       <div class="stat-card">
         <div class="stat-label">Weekly Gross</div>
@@ -1756,6 +1767,16 @@ td {
             
             <div class="hint-text" style="font-size: 12px; margin-top: 8px; color: var(--text-muted);">
               💡 Select "Next Monday" for loads that pick up this week but deliver next week. Revenue will count toward next week.
+            </div>
+
+            <div class="input-row" style="margin-top: 10px;">
+              <div class="input-group">
+                <label>Load Status</label>
+                <select id="load_status" style="font-weight:700;">
+                  <option value="confirmed" style="color: #00ff88;">✅ Confirmed</option>
+                  <option value="planned" style="color: #ffb800;">📋 Planned</option>
+                </select>
+              </div>
             </div>
 
             <!-- MULTI-STOP SECTION -->
@@ -1842,6 +1863,16 @@ td {
             <button class="btn-icon" onclick="exportCSV('week')">⬇️ Export CSV</button>
             <button class="btn-icon" onclick="printWeeklySummary()">🖨️ Print</button>
             <button class="btn-icon" onclick="generateSettlement()" style="border-color: rgba(0,255,136,0.3); color: var(--success);">📄 Settlement</button>
+          </div>
+        </div>
+
+        <!-- UPCOMING LOADS PREVIEW -->
+        <div class="card no-print" id="upcomingLoadsCard" style="display:none;">
+          <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>📅 Upcoming Loads</span>
+            <span id="upcomingCount" style="font-size:12px;color:var(--accent-cyan);font-weight:700;"></span>
+          </div>
+          <div class="card-body" id="upcomingLoadsBody" style="padding:12px 16px;max-height:300px;overflow-y:auto;">
           </div>
         </div>
       </div>
@@ -3355,11 +3386,33 @@ function getMostRecentOpenWeekId(d) {
 function renderWeekSelect(){
   const sel = document.getElementById("weekSelect");
   const d = getDriver();
+  
+  // Ensure future weeks exist
+  ensureFutureWeeksExist();
+  
+  const thisWeekId = isoDate(startOfWeekMonday(new Date()));
   const ids = Object.keys(d.weeks).sort().reverse();
   sel.innerHTML = ids.map(id=>{
     const w = d.weeks[id];
     const selected = (id === d.currentWeekId) ? "selected" : "";
-    return `<option value="${id}" ${selected}>${escapeHtml(w.label || id)}</option>`;
+    const loadCount = (w.loads || []).filter(l => !l.deliversNextWeek).length;
+    const plannedCount = (w.loads || []).filter(l => l.status === 'planned').length;
+    
+    let label = escapeHtml(w.label || id);
+    // Mark current real week
+    if (id === thisWeekId) {
+      label += ' ← This Week';
+    } else if (id > thisWeekId) {
+      label += ' (Future)';
+    }
+    // Show load count
+    if (loadCount > 0) {
+      label += ` [${loadCount} load${loadCount !== 1 ? 's' : ''}`;
+      if (plannedCount > 0) label += `, ${plannedCount} planned`;
+      label += ']';
+    }
+    
+    return `<option value="${id}" ${selected}>${label}</option>`;
   }).join("");
 }
 
@@ -3461,6 +3514,186 @@ function resetCurrentWeek(){
   saveState();
   updateUI();
   initMap();
+}
+
+/************************* 
+ * WEEK NAVIGATION & PLANNING 
+ *************************/
+function getWeekIdForOffset(offsetWeeks){
+  const d = new Date();
+  d.setDate(d.getDate() + (offsetWeeks * 7));
+  return isoDate(startOfWeekMonday(d));
+}
+
+function ensureFutureWeeksExist(){
+  const d = getDriver();
+  // Ensure current week + 2 future weeks exist
+  for (let offset = 0; offset <= 2; offset++) {
+    const weekId = getWeekIdForOffset(offset);
+    if (!d.weeks[weekId]) {
+      const dt = new Date(weekId + "T00:00:00");
+      d.weeks[weekId] = {
+        start: weekId,
+        label: fmtWeekLabel(startOfWeekMonday(dt)),
+        loads: [],
+        lastDropCoords: null
+      };
+    }
+  }
+}
+
+function navWeekPrev(){
+  const d = getDriver();
+  const ids = Object.keys(d.weeks).sort();
+  const curIdx = ids.indexOf(d.currentWeekId);
+  if (curIdx > 0) {
+    d.currentWeekId = ids[curIdx - 1];
+    saveState();
+    renderWeekSelect();
+    updateUI();
+    setTimeout(initMap, 150);
+  }
+}
+
+function navWeekNext(){
+  const d = getDriver();
+  ensureFutureWeeksExist();
+  const ids = Object.keys(d.weeks).sort();
+  const curIdx = ids.indexOf(d.currentWeekId);
+  if (curIdx < ids.length - 1) {
+    d.currentWeekId = ids[curIdx + 1];
+  } else {
+    // Create a new future week beyond what exists
+    const lastId = ids[ids.length - 1];
+    const lastDate = new Date(lastId + "T00:00:00");
+    lastDate.setDate(lastDate.getDate() + 7);
+    const newId = isoDate(lastDate);
+    d.weeks[newId] = {
+      start: newId,
+      label: fmtWeekLabel(lastDate),
+      loads: [],
+      lastDropCoords: null
+    };
+    d.currentWeekId = newId;
+  }
+  saveState();
+  renderWeekSelect();
+  updateUI();
+  setTimeout(initMap, 150);
+}
+
+function navWeekCurrent(){
+  const d = getDriver();
+  const thisWeekId = isoDate(startOfWeekMonday(new Date()));
+  ensureFutureWeeksExist();
+  if (!d.weeks[thisWeekId]) {
+    const dt = startOfWeekMonday(new Date());
+    d.weeks[thisWeekId] = {
+      start: thisWeekId,
+      label: fmtWeekLabel(dt),
+      loads: [],
+      lastDropCoords: null
+    };
+  }
+  d.currentWeekId = thisWeekId;
+  saveState();
+  renderWeekSelect();
+  updateUI();
+  setTimeout(initMap, 150);
+}
+
+function toggleLoadStatus(loadIndex){
+  const wk = getCurrentWeek();
+  const l = wk.loads[loadIndex];
+  if (!l) return;
+  l.status = (l.status === 'planned') ? 'confirmed' : 'planned';
+  saveState();
+  updateUI();
+}
+
+function renderUpcomingLoads(){
+  const card = document.getElementById('upcomingLoadsCard');
+  const body = document.getElementById('upcomingLoadsBody');
+  const countEl = document.getElementById('upcomingCount');
+  if (!card || !body) return;
+  
+  const d = getDriver();
+  const thisWeekId = isoDate(startOfWeekMonday(new Date()));
+  
+  // Collect loads from future weeks (after the current real week)
+  const futureWeekIds = Object.keys(d.weeks).sort().filter(id => {
+    // Only include weeks strictly after the current calendar week
+    return id > thisWeekId;
+  });
+  
+  let upcomingLoads = [];
+  futureWeekIds.forEach(wkId => {
+    const wk = d.weeks[wkId];
+    (wk.loads || []).forEach(l => {
+      upcomingLoads.push({
+        weekLabel: wk.label,
+        weekId: wkId,
+        origin: l.origin,
+        dest: l.dest,
+        gross: l.gross,
+        miles: l.miles,
+        status: l.status || 'confirmed',
+        pickupDay: l.pickupDay,
+        deliveryDay: l.deliveryDay
+      });
+    });
+  });
+  
+  // Also include cross-week loads from the current week
+  const currentWeek = d.weeks[thisWeekId];
+  if (currentWeek) {
+    (currentWeek.loads || []).filter(l => l.deliversNextWeek).forEach(l => {
+      upcomingLoads.push({
+        weekLabel: 'Next week delivery',
+        weekId: thisWeekId,
+        origin: l.origin,
+        dest: l.dest,
+        gross: l.gross,
+        miles: l.miles,
+        status: l.status || 'confirmed',
+        pickupDay: l.pickupDay,
+        deliveryDay: 'Monday'
+      });
+    });
+  }
+  
+  if (upcomingLoads.length === 0) {
+    card.style.display = 'none';
+    return;
+  }
+  
+  card.style.display = 'block';
+  const planned = upcomingLoads.filter(l => l.status === 'planned').length;
+  const confirmed = upcomingLoads.filter(l => l.status === 'confirmed').length;
+  countEl.textContent = `${upcomingLoads.length} load${upcomingLoads.length !== 1 ? 's' : ''} ahead` + 
+    (planned > 0 ? ` (${planned} planned)` : '');
+  
+  body.innerHTML = upcomingLoads.map(l => {
+    const statusColor = l.status === 'planned' ? 'var(--warning)' : 'var(--success)';
+    const statusIcon = l.status === 'planned' ? '📋' : '✅';
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border-subtle);">
+        <span style="font-size:14px;">${statusIcon}</span>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:13px;font-weight:700;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+            ${escapeHtml(l.origin)} → ${escapeHtml(l.dest)}
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);">
+            ${escapeHtml(l.weekLabel)}${l.pickupDay ? ' • Pick ' + l.pickupDay : ''}
+          </div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;">
+          <div style="font-size:13px;font-weight:800;color:var(--success);">${money(l.gross)}</div>
+          <div style="font-size:11px;color:var(--text-muted);">${Number(l.miles||0).toLocaleString()} mi</div>
+        </div>
+      </div>
+    `;
+  }).join('');
 }
 
 /************************* 
@@ -4637,6 +4870,7 @@ function addLoad(){
   } catch(e){ routeGeo=null; }
   
   const wk = getCurrentWeek();
+  const loadStatus = document.getElementById('load_status').value || 'confirmed';
   const loadData = {
     origin,
     dest,
@@ -4644,6 +4878,7 @@ function addLoad(){
     miles,
     loadedMiles,
     net,
+    status: loadStatus,
     createdAt: new Date().toISOString(),
     pickupDay,
     deliveryDay: deliversNextWeek ? "Monday" : deliveryDay, // Store as Monday for next week
@@ -4684,6 +4919,7 @@ function addLoad(){
   ['origin','dest','mi_load','mi_dh','cost_tolls','cost_detention','cost_accessorials','pay_gross','pickup_day','delivery_day'].forEach(i => 
     document.getElementById(i).value=""
   );
+  document.getElementById('load_status').value = 'confirmed';
   originEl.dataset.lat="";
   originEl.dataset.lon="";
   originEl.dataset.routeGeo="";
@@ -4831,6 +5067,14 @@ function editLoad(i){
         Changing gross will recalculate net profit. Miles cannot be changed (would affect route).
       </div>
       
+      <div class="input-group" style="margin-bottom: 16px;">
+        <label>Load Status</label>
+        <select id="edit_load_status" style="font-weight:700;">
+          <option value="confirmed" ${(l.status || 'confirmed') === 'confirmed' ? 'selected' : ''}>✅ Confirmed</option>
+          <option value="planned" ${l.status === 'planned' ? 'selected' : ''}>📋 Planned</option>
+        </select>
+      </div>
+      
       <div style="display: flex; gap: 8px;">
         <button class="btn-primary" onclick="saveLoadEdit(${i})">💾 Save Changes</button>
         <button class="btn-primary" onclick="viewDetail(${i})" style="background: var(--bg-secondary);">↩️ Back</button>
@@ -4893,6 +5137,9 @@ function saveLoadEdit(i){
   // Update days
   l.pickupDay = newPickupDay || undefined;
   l.deliveryDay = newDeliveryDay || undefined;
+  
+  // Update status
+  l.status = document.getElementById('edit_load_status').value || 'confirmed';
   
   saveState();
   alert("✅ Load updated");
@@ -7423,6 +7670,26 @@ function updateUI(){
   // Refresh sticky notes for selected driver
   loadDriverStickyNotesToUI();
   
+  // Show/hide future week planning banner
+  const fwBanner = document.getElementById('futureWeekBanner');
+  if (fwBanner) {
+    const thisWeekId = isoDate(startOfWeekMonday(new Date()));
+    const isFuture = d.currentWeekId > thisWeekId;
+    const isPast = d.currentWeekId < thisWeekId;
+    fwBanner.style.display = (isFuture || isPast) ? 'block' : 'none';
+    const bannerText = document.getElementById('futureWeekBannerText');
+    if (bannerText) {
+      if (isFuture) {
+        const plannedCount = loads.filter(l => l.status === 'planned').length;
+        const confirmedCount = loads.filter(l => l.status !== 'planned').length;
+        bannerText.textContent = `📅 Planning Mode — ${wk.label}` + 
+          (loads.length > 0 ? ` • ${confirmedCount} confirmed, ${plannedCount} planned` : ' • No loads yet');
+      } else if (isPast) {
+        bannerText.textContent = `📆 Viewing Past Week — ${wk.label}`;
+      }
+    }
+  }
+  
   document.getElementById('wk_gross').innerText = money(totals.gross);
   document.getElementById('wk_miles').innerText = totals.miles.toLocaleString();
   
@@ -7466,8 +7733,12 @@ function updateUI(){
       ? `<span style="display:inline-block;background:rgba(0,180,255,0.15);color:var(--accent-cyan);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;margin-left:8px;">From Prev Week</span>`
       : '';
     
+    const statusBadge = l.status === 'planned'
+      ? `<span style="display:inline-block;background:rgba(255,184,0,0.2);color:var(--warning);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;margin-left:8px;cursor:pointer;" onclick="event.stopPropagation();toggleLoadStatus(${i})" title="Click to confirm">📋 Planned</span>`
+      : '';
+    
     return `
-      <tr style="${l.deliversNextWeek ? 'opacity: 0.7;' : ''}">
+      <tr style="${l.deliversNextWeek ? 'opacity: 0.7;' : ''}${l.status === 'planned' ? 'border-left: 3px solid var(--warning);' : ''}">
         <td style="font-weight:700;font-size:13px;">
           ${escapeHtml(l.origin)} 
           <span style="color:var(--accent-cyan)">➜</span> 
@@ -7475,6 +7746,7 @@ function updateUI(){
           ${multiStopBadge}
           ${crossWeekBadge}
           ${prevWeekBadge}
+          ${statusBadge}
           ${dayInfo}
         </td>
         <td>${Number(l.miles||0).toLocaleString()}</td>
@@ -7555,6 +7827,7 @@ function updateUI(){
   renderWeekSelect();
   bindDriverOverridesToInputs();
   updateFleetTables();
+  renderUpcomingLoads();
 }
 
 /************************* 
